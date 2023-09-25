@@ -1,5 +1,35 @@
 import { LngLatBounds } from 'mapbox-gl';
 import tilebelt from '@mapbox/tilebelt';
+import { FeatureCollection, Position } from 'geojson';
+
+export const getFeatureCollectionFromBounds = (
+  bounds: LngLatBounds,
+  zoomLevel: number
+) => {
+  const coordinates = getCoordinateListFromBounds(bounds, zoomLevel);
+  const featureCollection = getFeatureCollectionFromCoordinates(coordinates);
+  return featureCollection as FeatureCollection;
+};
+
+export const getCoordinateListFromBoundss = (
+  bounds: LngLatBounds,
+  zoomLevel: number
+) => {
+  const ne = bounds.getNorthEast();
+  const sw = bounds.getSouthWest();
+
+  return getFeatureCollectionFromCoordinates([
+    [
+      [
+        [sw.lng, sw.lat],
+        [ne.lng, sw.lat],
+        [ne.lng, ne.lat],
+        [sw.lng, ne.lat],
+        [sw.lng, sw.lat],
+      ],
+    ],
+  ]) as FeatureCollection;
+};
 
 export const getCoordinateListFromBounds = (
   bounds: LngLatBounds,
@@ -23,4 +53,21 @@ export const getCoordinateListFromBounds = (
     }
   }
   return coordinateList;
+};
+
+export const getFeatureCollectionFromCoordinates = (
+  coordinates: Position[][][]
+) => {
+  return {
+    type: 'FeatureCollection',
+    features: [
+      {
+        type: 'Feature',
+        geometry: {
+          type: 'MultiPolygon',
+          coordinates: coordinates,
+        },
+      },
+    ],
+  };
 };

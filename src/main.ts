@@ -1,5 +1,5 @@
 import mapboxgl from 'mapbox-gl';
-import { TileControl } from './tile/tile-control';
+import { MapboxTileSelectorOptions, TileControl } from './tile/tile-control';
 import './tile/tile-control.css';
 
 const map = new mapboxgl.Map({
@@ -11,4 +11,7 @@ const map = new mapboxgl.Map({
   zoom: 17, // starting zoom
 });
 
-map.addControl(new TileControl({ maxTile: 50, zoomLevel: 22 }));
+const options: MapboxTileSelectorOptions = { maxTile: 50, zoomLevel: 22, minZoom: 17 };
+const tileControl: TileControl = new TileControl(options);
+
+map.addControl(tileControl, 'top-right');
