@@ -1,12 +1,11 @@
 .tile-ctrl-menu {
-  margin: 20px;
   padding: 35px;
 
   width: 250px;
   height: 120px;
   border-radius: 5px;
 
-  background-color: rgba(32, 32, 32, 0.95);
+  background-color: rgba(10, 10, 10, 0.9);
 }
 
 .tile-text-container {

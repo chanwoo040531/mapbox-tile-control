@@ -1,22 +1,21 @@
-import mapboxgl, {
+import * as tilebelt from '@mapbox/tilebelt';
+import {
   FillPaint,
   GeoJSONSource,
+  GeoJSONSourceRaw,
   IControl,
+  LngLat,
+  LngLatBounds,
   MapMouseEvent,
   Map as MapboxMap,
-  Point,
-  GeoJSONSourceRaw,
-  LngLatBounds,
-  LngLat,
-  LngLatBoundsLike,
-  LngLatLike,
 } from 'mapbox-gl';
 import {
-  getCoordinateListFromBounds,
-  getCoordinateListFromBoundss,
+  getCoordinatesFromBounds,
   getFeatureCollectionFromBounds,
+  getFeatureCollectionFromCoordinates,
 } from './calculator';
-import tilebelt from '@mapbox/tilebelt';
+
+import { FeatureCollection } from 'geojson';
 
 export type MapboxTileSelectorOptions = {
   maxTile: number;
@@ -43,13 +42,18 @@ export type GridLoadEvent = {
   target: MapboxMap;
 };
 
-type SelectTileInfos = {
-  startLngLat?: LngLatLike;
-  quadKeys?: string[];
+type SelectedLngLatInfos = {
+  startLngLat?: LngLat;
+  lastLngLat?: LngLat;
 };
 
 type TileMouseEvent = {
   tileCount: number;
+};
+
+type CoordinatesInfo = {
+  featureCollection: FeatureCollection | undefined;
+  quadKeyList: string[] | undefined;
 };
 
 export class TileControl implements IControl {
@@ -71,7 +75,7 @@ export class TileControl implements IControl {
     gridLayer: {
       paint: {
         'fill-color': 'black',
-        'fill-outline-color': ['case', ['get', 'layer']],
+        'fill-outline-color': 'black',
         'fill-opacity': 0.2,
       },
     },
@@ -84,11 +88,13 @@ export class TileControl implements IControl {
     selectedLayer: {
       paint: {
         'fill-color': 'red',
+        'fill-opacity': 0.2,
       },
     },
     userLayer: {
       paint: {
         'fill-color': 'yellow',
+        'fill-opacity': 0.2,
       },
     },
   };
@@ -101,11 +107,19 @@ export class TileControl implements IControl {
   private boundMouseMoveToDrawHandler: (e: MapMouseEvent) => void;
   private fireMouseMoveHandler?: (e: TileMouseEvent) => void;
   private fireGridLoadHandler?: (e: GridLoadEvent) => void;
+  private boundClearSelectionHandler: () => void;
 
   private tileSelectionActivated: boolean = false;
-  private tileInfo: SelectTileInfos = {
-    quadKeys: undefined,
+  private lngLatInfo: SelectedLngLatInfos = {
     startLngLat: undefined,
+    lastLngLat: undefined,
+  };
+
+  private currentSelectedTiles?: CoordinatesInfo = undefined;
+
+  private selectedTiles: CoordinatesInfo = {
+    featureCollection: undefined,
+    quadKeyList: undefined,
   };
 
   constructor(
@@ -116,29 +130,35 @@ export class TileControl implements IControl {
     this.options = options || TileControl.DEFAULT_OPTIONS;
 
     this.boundMouseMoveToDrawHandler = this.mouseMoveToDrawHandler.bind(this);
+    this.boundClearSelectionHandler = this.clearSelectionHandler.bind(this);
   }
 
   public onAdd(map: MapboxMap): HTMLElement {
     this.map = map;
     this.controlContainer = this.createControlContainer();
 
-    this.map.on('load', this.loadHandler.bind(this));
+    this.map.on('style.load', this.loadHandler.bind(this));
     this.map.on('dragend', this.drawGridHandler.bind(this));
     this.map.on('zoomend', this.drawGridHandler.bind(this));
     this.map.on('click', 'grid-layer', this.tileSelectHandler.bind(this));
-    
+
     return this.controlContainer;
   }
-  
+
   public onRemove() {
-    console.log('remove');
+    if (this.map) {
+      this.map.off('style.load', this.loadHandler.bind(this));
+      this.map.off('dragend', this.drawGridHandler.bind(this));
+      this.map.off('zoomend', this.drawGridHandler.bind(this));
+      this.map.off('click', 'grid-layer', this.tileSelectHandler.bind(this));
+    }
+    this.fireMouseMoveHandler = undefined;
+    this.fireGridLoadHandler = undefined;
+    this.currentSelectedTiles = undefined;
     this.map = undefined;
   }
 
-  public onGridLoad(event: (e: GridLoadEvent) => void) {
-    const boundEvent = event.bind(this);
-    this.fireGridLoadHandler = boundEvent;
-  }
+  public getDefaultPosition = () => 'top-right';
 
   private onMouseMove(event: (e: TileMouseEvent) => void) {
     const boundEvent = event.bind(this);
@@ -147,15 +167,16 @@ export class TileControl implements IControl {
 
   private createControlContainer(): HTMLElement {
     const _controlContainer = document.createElement('div');
-    _controlContainer.className = 'tile-ctrl-menu';
+    _controlContainer.classList.add('mapboxgl-ctrl');
+    _controlContainer.classList.add('tile-ctrl-menu');
 
     const textContainer = document.createElement('div');
     textContainer.className = 'tile-text-container';
-    textContainer.innerText = `No Tiles Selected.`;
+    textContainer.innerText = 'No Tiles Selected.';
     this.onMouseMove((e: TileMouseEvent) => {
       textContainer.innerText = e.tileCount
         ? `${e.tileCount}/${this.options.maxTile} Tiles Selected.`
-        : `No Tiles Selected.`;
+        : 'No Tiles Selected.';
     });
     _controlContainer.appendChild(textContainer);
 
@@ -172,6 +193,7 @@ export class TileControl implements IControl {
     clearButton.className = 'tile-clear-button';
     clearButton.type = 'button';
     clearButton.innerText = 'CLEAR SELECTION';
+    clearButton.onclick = this.boundClearSelectionHandler;
     buttonContainer.appendChild(clearButton);
 
     _controlContainer.appendChild(buttonContainer);
@@ -184,8 +206,23 @@ export class TileControl implements IControl {
       throw Error('map is undefined');
     }
 
+    const selectedTileSource: GeoJSONSourceRaw = {
+      type: 'geojson',
+      data: {
+        type: 'FeatureCollection',
+        features: [],
+      },
+    };
+
+    const selectedFeatureCollection = this.selectedTiles.featureCollection;
+
+    if (selectedFeatureCollection) {
+      selectedTileSource.data = selectedFeatureCollection;
+    }
+
     this.map.addSource('grid-source', TileControl.EMPTY_SOURCE);
     this.map.addSource('select-source', TileControl.EMPTY_SOURCE);
+    this.map.addSource('selected-source', selectedTileSource);
 
     this.map.addLayer({
       id: 'grid-layer',
@@ -195,22 +232,41 @@ export class TileControl implements IControl {
       minzoom: this.options.minZoom,
     });
 
-    this.map.addLayer({
-      id: 'select-layer',
-      type: 'fill',
-      source: 'select-source',
-      paint: this.styles.selectLayer?.paint,
-      minzoom: this.options.minZoom,
-    });
+    this.map.addLayer(
+      {
+        id: 'select-layer',
+        type: 'fill',
+        source: 'select-source',
+        paint: this.styles.selectLayer?.paint,
+        minzoom: this.options.minZoom,
+      },
+      'grid-layer'
+    );
+
+    this.map.addLayer(
+      {
+        id: 'selected-layer',
+        type: 'fill',
+        source: 'selected-source',
+        paint: this.styles.selectedLayer?.paint,
+        minzoom: this.options.minZoom,
+      },
+      'grid-layer'
+    );
+
+    this.drawGridHandler();
   }
 
   private drawGridHandler() {
     if (!this.map) {
       throw Error('map is undefined');
     }
-    if (this.fireGridLoadHandler) {
-      this.fireGridLoadHandler({ map: this.map });
+
+    if (this.map.getZoom() < 17) {
+      return;
     }
+
+    this.fireGridLoadHandler?.call(this, { target: this.map });
 
     const featureCollection = getFeatureCollectionFromBounds(
       this.map.getBounds(),
@@ -228,14 +284,22 @@ export class TileControl implements IControl {
 
     if (!this.tileSelectionActivated) {
       this.tileSelectionActivated = true;
-      this.tileInfo.startLngLat = e.lngLat;
+      const lngLat = this.formatLngLat(e.lngLat as LngLat);
+      this.lngLatInfo.startLngLat = lngLat;
+      
+      const tile = tilebelt.pointToTile(lngLat.lng, lngLat.lat, this.options.zoomLevel);
+      const coordinates = tilebelt.tileToGeoJSON(tile).coordinates;
+      const featureColleciton = getFeatureCollectionFromCoordinates([coordinates]);
+      
+      const selectLayer = this.map.getSource('select-source') as GeoJSONSource;
+      selectLayer.setData(featureColleciton);
 
       this.map.on('mousemove', this.boundMouseMoveToDrawHandler);
     } else {
       this.tileSelectionActivated = false;
-      this.tileInfo.startLngLat = undefined;
-      this.appendSelectTilesToSelectedTiles();
+      this.lngLatInfo.startLngLat = undefined;
       this.map.off('mousemove', this.boundMouseMoveToDrawHandler);
+      this.appendSelectTilesToSelectedTiles();
     }
   }
 
@@ -244,54 +308,126 @@ export class TileControl implements IControl {
       throw Error('map is undefined');
     }
 
-    const start = this.lngLatToBbox(this.tileInfo.startLngLat as LngLat);
-    const current = this.lngLatToBbox(e.lngLat);
+    const start = this.lngLatInfo.startLngLat as LngLat;
+    const last = this.lngLatInfo.lastLngLat as LngLat;
+    const current = this.formatLngLat(e.lngLat);
 
-    const minLngLat: LngLatLike = [
-      Math.min(start[2], current[0]),
-      Math.min(start[3], current[1]),
-    ];
+    if (last && last.lng === current.lng && last.lat === current.lat) {
+      return;
+    }
+    this.lngLatInfo.lastLngLat = current;
 
-    const maxLngLat: LngLatLike = [
-      Math.max(start[2], current[0]),
-      Math.max(start[3], current[1]),
-    ];
+    const minLng = Math.min(start.lng, current.lng);
+    const minLat = Math.min(start.lat, current.lat);
+    const maxLng = Math.max(start.lng, current.lng);
+    const maxLat = Math.max(start.lat, current.lat);
 
-    const bounds = new LngLatBounds([minLngLat, maxLngLat]);
-    const featureCollection = getCoordinateListFromBoundss(
+    const bounds = new LngLatBounds([minLng, minLat, maxLng, maxLat]);
+    const coordinates = getCoordinatesFromBounds(
       bounds,
-      this.options.zoomLevel
+      this.options.zoomLevel,
+      (lngLat) => this.layerExistOn(lngLat, ['selected-layer'])
     );
 
-    const selectLayer = this.map.getSource('select-source') as GeoJSONSource;
-    selectLayer.setData(featureCollection);
+    const haveSelectedQuadKeys = this.selectedTiles?.quadKeyList ?? [];
 
-    if (this.fireMouseMoveHandler) {
-      this.fireMouseMoveHandler({ tileCount: 10 });
+    const totalCount =
+      coordinates.quadKeyList.length + haveSelectedQuadKeys.length;
+
+    if (totalCount > this.options.maxTile) {
+      return;
     }
+
+    const selectLayer = this.map.getSource('select-source') as GeoJSONSource;
+    selectLayer.setData(coordinates.featureCollection);
+
+    this.currentSelectedTiles = coordinates;
+
+    this.fireMouseMoveHandler?.call(this, {
+      tileCount: coordinates.quadKeyList.length + haveSelectedQuadKeys.length,
+    });
   }
 
-  private lngLatToBbox(lngLat: LngLat) {
+  private layerExistOn(lngLat: LngLat, layers: string[]) {
+    if (!this.map) {
+      throw Error('map is undefined');
+    }
+    if (!layers) {
+      return false;
+    }
+    const point = this.map.project(lngLat);
+    const features = this.map.queryRenderedFeatures(point, {
+      layers: layers,
+    });
+    return features.length > 0;
+  }
+
+  private formatLngLat(lngLat: LngLat) {
     const tile = tilebelt.pointToTile(
       lngLat.lng,
       lngLat.lat,
       this.options.zoomLevel
     );
-    return tilebelt.tileToBBOX(tile);
+    const bbox = tilebelt.tileToBBOX(tile);
+    return new LngLat((bbox[2] + bbox[0]) / 2, (bbox[3] + bbox[1]) / 2);
   }
 
-  // private formatLngLat(lngLat: LngLat) {
-  //   const tile = tilebelt.pointToTile(
-  //     lngLat.lng,
-  //     lngLat.lat,
-  //     this.options.zoomLevel
-  //   );
-  //   const bbox = tilebelt.tileToBBOX(tile);
-  //   return new mapboxgl.LngLat(
-  //     (bbox[2] + bbox[0]) / 2,
-  //     (bbox[3] + bbox[1]) / 2
-  //   );
-  // }
+  private clearSelectionHandler() {
+    if (!this.map) {
+      throw Error('map is undefined');
+    }
 
-  private appendSelectTilesToSelectedTiles() {}
+    this.selectedTiles.featureCollection = undefined;
+    this.selectedTiles.quadKeyList = undefined;
+    const selectedLayer = this.map.getSource(
+      'selected-source'
+    ) as GeoJSONSource;
+
+    const featureCollection = TileControl.EMPTY_SOURCE
+      .data as FeatureCollection;
+    selectedLayer.setData(featureCollection);
+
+    this.fireMouseMoveHandler?.call(this, { tileCount: 0 });
+  }
+
+  private appendSelectTilesToSelectedTiles() {
+    if (!this.map) {
+      throw Error('map is undefined');
+    }
+
+    if (!this.currentSelectedTiles) {
+      return;
+    }
+
+    const currentFeatureCollection = this.currentSelectedTiles
+      .featureCollection as FeatureCollection;
+    const currentQuadKeyList = this.currentSelectedTiles
+      .quadKeyList as string[];
+
+    if (
+      this.selectedTiles.featureCollection &&
+      this.selectedTiles.quadKeyList
+    ) {
+      this.selectedTiles.featureCollection.features.push(
+        ...currentFeatureCollection.features
+      );
+      this.selectedTiles.quadKeyList.push(...currentQuadKeyList);
+    } else {
+      this.selectedTiles.featureCollection =
+        this.currentSelectedTiles.featureCollection;
+      this.selectedTiles.quadKeyList = this.currentSelectedTiles.quadKeyList;
+    }
+
+    this.currentSelectedTiles = undefined;
+
+    const selectLayer = this.map.getSource('select-source') as GeoJSONSource;
+    selectLayer.setData(TileControl.EMPTY_SOURCE.data as FeatureCollection);
+
+    const selectedLayer = this.map.getSource(
+      'selected-source'
+    ) as GeoJSONSource;
+    selectedLayer.setData(
+      this.selectedTiles.featureCollection as FeatureCollection
+    );
+  }
 }
