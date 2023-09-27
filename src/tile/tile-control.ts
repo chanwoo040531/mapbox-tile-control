@@ -17,10 +17,26 @@ import {
 
 import { FeatureCollection } from 'geojson';
 
-export type MapboxTileSelectorOptions = {
+export type TileEvent = {
+  target: MapboxMap
+}
+
+export type TileMapOptions = {
   maxTile: number;
   zoomLevel: number;
   minZoom: number;
+}
+
+export type TileControlEvents = {
+  onDrawGrid?: (event: TileEvent) => void;
+  onTileDrawStart?: (event: TileEvent) => void;
+  onTileDrawEnd?: (event: TileEvent) => void;
+  onTileDrawing?: (event: TileEvent) => void;
+}
+
+export type TileControlOptions = {
+  map?: TileMapOptions;
+  events?: TileControlEvents;
 };
 
 export type MapboxTileSelectorStyles = {
@@ -38,10 +54,6 @@ export type MapboxTileSelectorStyles = {
   };
 };
 
-export type GridLoadEvent = {
-  target: MapboxMap;
-};
-
 type SelectedLngLatInfos = {
   startLngLat?: LngLat;
   lastLngLat?: LngLat;
@@ -57,7 +69,7 @@ type CoordinatesInfo = {
 };
 
 export class TileControl implements IControl {
-  private static readonly DEFAULT_OPTIONS: MapboxTileSelectorOptions = {
+  private static readonly DEFAULT_OPTIONS: TileMapOptions = {
     maxTile: 750,
     zoomLevel: 22,
     minZoom: 17,
@@ -99,14 +111,14 @@ export class TileControl implements IControl {
     },
   };
 
-  public options: MapboxTileSelectorOptions;
+  public options: TileMapOptions;
   public styles: MapboxTileSelectorStyles;
   private map?: MapboxMap;
   private controlContainer?: HTMLElement;
+  private events?: TileControlEvents;
 
   private boundMouseMoveToDrawHandler: (e: MapMouseEvent) => void;
-  private fireMouseMoveHandler?: (e: TileMouseEvent) => void;
-  private fireGridLoadHandler?: (e: GridLoadEvent) => void;
+  private fireTileChangedHandler?: (e: TileMouseEvent) => void;
   private boundClearSelectionHandler: () => void;
 
   private tileSelectionActivated: boolean = false;
@@ -123,11 +135,12 @@ export class TileControl implements IControl {
   };
 
   constructor(
-    options?: MapboxTileSelectorOptions,
+    options?: TileControlOptions,
     styles?: MapboxTileSelectorStyles
   ) {
     this.styles = styles || TileControl.DEFAULT_STYLES;
-    this.options = options || TileControl.DEFAULT_OPTIONS;
+    this.options = options?.map || TileControl.DEFAULT_OPTIONS;
+    this.events = options?.events || undefined;
 
     this.boundMouseMoveToDrawHandler = this.mouseMoveToDrawHandler.bind(this);
     this.boundClearSelectionHandler = this.clearSelectionHandler.bind(this);
@@ -136,7 +149,6 @@ export class TileControl implements IControl {
   public onAdd(map: MapboxMap): HTMLElement {
     this.map = map;
     this.controlContainer = this.createControlContainer();
-
     this.map.on('style.load', this.loadHandler.bind(this));
     this.map.on('dragend', this.drawGridHandler.bind(this));
     this.map.on('zoomend', this.drawGridHandler.bind(this));
@@ -152,17 +164,15 @@ export class TileControl implements IControl {
       this.map.off('zoomend', this.drawGridHandler.bind(this));
       this.map.off('click', 'grid-layer', this.tileSelectHandler.bind(this));
     }
-    this.fireMouseMoveHandler = undefined;
-    this.fireGridLoadHandler = undefined;
+    this.fireTileChangedHandler = undefined;
     this.currentSelectedTiles = undefined;
     this.map = undefined;
   }
 
   public getDefaultPosition = () => 'top-right';
 
-  private onMouseMove(event: (e: TileMouseEvent) => void) {
-    const boundEvent = event.bind(this);
-    this.fireMouseMoveHandler = boundEvent;
+  private onTileChanged(event: (e: TileMouseEvent) => void) {
+    this.fireTileChangedHandler = event.bind(this);
   }
 
   private createControlContainer(): HTMLElement {
@@ -173,7 +183,7 @@ export class TileControl implements IControl {
     const textContainer = document.createElement('div');
     textContainer.className = 'tile-text-container';
     textContainer.innerText = 'No Tiles Selected.';
-    this.onMouseMove((e: TileMouseEvent) => {
+    this.onTileChanged((e: TileMouseEvent) => {
       textContainer.innerText = e.tileCount
         ? `${e.tileCount}/${this.options.maxTile} Tiles Selected.`
         : 'No Tiles Selected.';
@@ -261,18 +271,16 @@ export class TileControl implements IControl {
     if (!this.map) {
       throw Error('map is undefined');
     }
-
     if (this.map.getZoom() < 17) {
       return;
     }
-
-    this.fireGridLoadHandler?.call(this, { target: this.map });
 
     const featureCollection = getFeatureCollectionFromBounds(
       this.map.getBounds(),
       this.options.zoomLevel
     );
 
+    this.events?.onDrawGrid?.call(this, { target: this.map });
     const gridSource = this.map.getSource('grid-source') as GeoJSONSource;
     gridSource.setData(featureCollection);
   }
@@ -286,18 +294,26 @@ export class TileControl implements IControl {
       this.tileSelectionActivated = true;
       const lngLat = this.formatLngLat(e.lngLat as LngLat);
       this.lngLatInfo.startLngLat = lngLat;
-      
-      const tile = tilebelt.pointToTile(lngLat.lng, lngLat.lat, this.options.zoomLevel);
+
+      const tile = tilebelt.pointToTile(
+        lngLat.lng,
+        lngLat.lat,
+        this.options.zoomLevel
+      );
       const coordinates = tilebelt.tileToGeoJSON(tile).coordinates;
-      const featureColleciton = getFeatureCollectionFromCoordinates([coordinates]);
-      
+      const featureColleciton = getFeatureCollectionFromCoordinates([
+        coordinates,
+      ]);
+
       const selectLayer = this.map.getSource('select-source') as GeoJSONSource;
       selectLayer.setData(featureColleciton);
 
+      this.events?.onTileDrawStart?.call(this, { target: this.map });
       this.map.on('mousemove', this.boundMouseMoveToDrawHandler);
     } else {
       this.tileSelectionActivated = false;
       this.lngLatInfo.startLngLat = undefined;
+      this.events?.onTileDrawEnd?.call(this, { target: this.map });
       this.map.off('mousemove', this.boundMouseMoveToDrawHandler);
       this.appendSelectTilesToSelectedTiles();
     }
@@ -343,7 +359,8 @@ export class TileControl implements IControl {
 
     this.currentSelectedTiles = coordinates;
 
-    this.fireMouseMoveHandler?.call(this, {
+    this.events?.onTileDrawing?.call(this, { target: this.map });
+    this.fireTileChangedHandler?.call(this, {
       tileCount: coordinates.quadKeyList.length + haveSelectedQuadKeys.length,
     });
   }
@@ -387,7 +404,7 @@ export class TileControl implements IControl {
       .data as FeatureCollection;
     selectedLayer.setData(featureCollection);
 
-    this.fireMouseMoveHandler?.call(this, { tileCount: 0 });
+    this.fireTileChangedHandler?.call(this, { tileCount: 0 });
   }
 
   private appendSelectTilesToSelectedTiles() {

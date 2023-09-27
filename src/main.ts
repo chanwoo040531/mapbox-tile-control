@@ -1,5 +1,5 @@
 import * as mapboxgl from 'mapbox-gl';
-import { MapboxTileSelectorOptions, TileControl } from './tile/tile-control';
+import { TileControlOptions, TileControl } from './tile/tile-control';
 import {
   MapboxStyleDefinition,
   MapboxStyleSwitcherControl,
@@ -17,10 +17,12 @@ const map = new mapboxgl.Map({
 });
 
 const getTileControl = () => {
-  const options: MapboxTileSelectorOptions = {
-    maxTile: 750,
-    zoomLevel: 22,
-    minZoom: 17,
+  const options: TileControlOptions = {
+    map: {
+      maxTile: 750,
+      zoomLevel: 22,
+      minZoom: 17,
+    }
   };
   return new TileControl(options);
 };
@@ -52,4 +54,4 @@ const getStyleSwitcher = () => {
 };
 
 map.addControl(getTileControl());
-map.addControl(getStyleSwitcher(), 'top-left');
+map.addControl(getStyleSwitcher());
