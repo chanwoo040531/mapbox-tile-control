@@ -12,7 +12,7 @@
   "devDependencies": {
     "typedoc": "^0.25.1",
     "typescript": "^5.2.2",
-    "vite": "^4.4.5"
+    "vite": "^4.5.2"
   },
   "dependencies": {
     "@mapbox/tilebelt": "^1.0.2",
